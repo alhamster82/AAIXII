@@ -158,3 +158,83 @@ ANGELA_AIX_ABI = [
     {"inputs": [{"name": "offset", "type": "uint256"}, {"name": "limit", "type": "uint256"}], "name": "getClawIdsPaginated", "outputs": [{"name": "ids", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
 ]
 
+# -----------------------------------------------------------------------------
+# Client
+# -----------------------------------------------------------------------------
+
+def to_hex(b: bytes) -> str:
+    return "0x" + b.hex()
+
+def to_bytes32(s: str) -> bytes:
+    s = s.replace("0x", "").zfill(64)
+    return bytes.fromhex(s)[:32]
+
+class AngelaAIXClient:
+    def __init__(self, rpc_url: str, contract_address: str, private_key: Optional[str] = None):
+        if not WEB3_AVAILABLE:
+            raise RuntimeError("web3 and eth_account required. pip install web3 eth-account")
+        self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+        self.contract_address = Web3.to_checksum_address(contract_address)
+        self.contract = self.w3.eth.contract(address=self.contract_address, abi=ANGELA_AIX_ABI)
+        self.private_key = private_key
+        self.account = Account.from_key(private_key) if private_key else None
+
+    def is_connected(self) -> bool:
+        return self.w3.is_connected()
+
+    def claw_count(self) -> int:
+        return self.contract.functions.clawCount().call()
+
+    def can_submit_now(self) -> bool:
+        return self.contract.functions.canSubmitNow().call()
+
+    def get_claw(self, claw_id: int) -> tuple:
+        return self.contract.functions.getClaw(claw_id).call()
+
+    def get_operator(self) -> str:
+        return self.contract.functions.operator().call()
+
+    def get_guardian(self) -> str:
+        return self.contract.functions.guardian().call()
+
+    def is_paused(self) -> bool:
+        return self.contract.functions.paused().call()
+
+    def is_halted(self) -> bool:
+        return self.contract.functions.emergencyHalt().call()
+
+    def get_cooldown_blocks(self) -> int:
+        return self.contract.functions.cooldownBlocks().call()
+
+    def get_rate_limit_window(self) -> int:
+        return self.contract.functions.rateLimitWindowBlocks().call()
+
+    def get_rate_limit_max(self) -> int:
+        return self.contract.functions.rateLimitMaxClaws().call()
+
+    def get_balance(self) -> int:
+        return self.contract.functions.contractBalance().call()
+
+    def get_claw_ids_paginated(self, offset: int, limit: int) -> list:
+        return self.contract.functions.getClawIdsPaginated(offset, limit).call()
+
+    def submit_claw(self, claw_kind: int, payload_hash: str, min_value: int, max_value: int) -> str:
+        if not self.account:
+            raise ValueError("Private key required")
+        payload_b32 = to_bytes32(payload_hash)
+        tx = self.contract.functions.submitClaw(
+            claw_kind,
+            payload_b32,
+            min_value,
+            max_value
+        ).build_transaction({"from": self.account.address, "gas": 250_000})
+        signed = self.w3.eth.account.sign_transaction(tx, self.account.key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        return tx_hash.hex()
+
+    def mark_executed(self, claw_id: int, actual_value: int) -> str:
+        if not self.account:
+            raise ValueError("Private key required")
+        tx = self.contract.functions.markClawExecuted(claw_id, actual_value).build_transaction(
+            {"from": self.account.address, "gas": 150_000}
+        )
