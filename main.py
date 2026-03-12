@@ -398,3 +398,83 @@ def health_check(config: AAIXIIConfig) -> dict[str, Any]:
     try:
         client = AngelaAIXClient(config.effective_rpc, config.contract_address)
         result["connected"] = client.is_connected()
+        result["paused"] = client.is_paused() if result["connected"] else None
+        result["clawCount"] = client.claw_count() if result["connected"] else None
+        result["ok"] = result["connected"]
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+def cmd_health(config: AAIXIIConfig) -> None:
+    h = health_check(config)
+    for k, v in h.items():
+        LOG.info("  %s: %s", k, v)
+
+def cmd_version(config: AAIXIIConfig) -> None:
+    print(get_version())
+
+def cmd_kinds(config: AAIXIIConfig) -> None:
+    for kind, name in list_claw_kinds():
+        LOG.info("  %s: %s", kind, name)
+
+def random_payload_hash() -> str:
+    import secrets
+    return "0x" + secrets.token_hex(32)
+
+def build_payload_hash_from_string(s: str) -> str:
+    import hashlib
+    h = hashlib.sha256(s.encode()).digest()
+    return "0x" + h.hex()
+
+# -----------------------------------------------------------------------------
+# Batch submit (multiple claws in one tx if contract supports it)
+# -----------------------------------------------------------------------------
+
+ANGELA_AIX_ABI_BATCH = [
+    {"inputs": [{"name": "clawKinds", "type": "uint8[]"}, {"name": "payloadHashes", "type": "bytes32[]"}, {"name": "minValues", "type": "uint256[]"}, {"name": "maxValues", "type": "uint256[]"}], "name": "submitClawBatch", "outputs": [{"name": "clawIds", "type": "uint256[]"}], "stateMutability": "nonpayable", "type": "function"},
+]
+
+def submit_claw_batch(client: AngelaAIXClient, kinds: list[int], payload_hashes: list[str], min_vals: list[int], max_vals: list[int]) -> str:
+    if not client.account:
+        raise ValueError("Private key required")
+    n = len(kinds)
+    if n != len(payload_hashes) or n != len(min_vals) or n != len(max_vals):
+        raise ValueError("Length mismatch")
+    if n > MAX_CLAWS_PER_BATCH:
+        raise ValueError(f"Max {MAX_CLAWS_PER_BATCH} per batch")
+    payloads_b32 = [to_bytes32(p) for p in payload_hashes]
+    abi = ANGELA_AIX_ABI + ANGELA_AIX_ABI_BATCH
+    from web3 import Web3
+    contract = client.w3.eth.contract(address=client.contract_address, abi=abi)
+    tx = contract.functions.submitClawBatch(kinds, payloads_b32, min_vals, max_vals).build_transaction(
+        {"from": client.account.address, "gas": 600_000}
+    )
+    signed = client.w3.eth.account.sign_transaction(tx, client.account.key)
+    tx_hash = client.w3.eth.send_raw_transaction(signed.raw_transaction)
+    return tx_hash.hex()
+
+def cmd_submit_batch(config: AAIXIIConfig, kinds_str: str, payloads_str: str, mins_str: str, maxs_str: str) -> None:
+    if not config.private_key or not config.contract_address or not WEB3_AVAILABLE:
+        LOG.error("Set private_key, contract_address, and install web3")
+        return
+    kinds = [int(x) for x in kinds_str.split(",")]
+    payloads = [x.strip() for x in payloads_str.split(",")]
+    mins = [int(x) for x in mins_str.split(",")]
+    maxs = [int(x) for x in maxs_str.split(",")]
+    if len(kinds) != len(payloads) or len(kinds) != len(mins) or len(kinds) != len(maxs):
+        LOG.error("Length mismatch in batch args")
+        return
+    client = AngelaAIXClient(config.effective_rpc, config.contract_address, config.private_key)
+    try:
+        tx_hash = submit_claw_batch(client, kinds, payloads, mins, maxs)
+        LOG.info("Batch submit tx: %s", tx_hash)
+    except Exception as e:
+        LOG.error("Batch submit failed: %s", e)
+
+# -----------------------------------------------------------------------------
+# Register batch and extra commands
+# -----------------------------------------------------------------------------
+
+def register_commands(sub: Any, parser: Any) -> None:
+    p_health = sub.add_parser("health", help="Health check")
+    p_health.set_defaults(func=lambda a, c: cmd_health(c))
