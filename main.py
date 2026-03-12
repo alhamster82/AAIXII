@@ -318,3 +318,83 @@ def cmd_mark_reverted(config: AAIXIIConfig, claw_id: int, reason: str = "") -> N
         LOG.error("web3 required")
         return
     client = AngelaAIXClient(config.effective_rpc, config.contract_address, config.private_key)
+    tx_hash = client.mark_reverted(claw_id, reason.encode() if reason else b"")
+    LOG.info("Mark reverted tx: %s", tx_hash)
+
+def cmd_init(config: AAIXIIConfig, chain: str, contract: Optional[str], rpc: Optional[str]) -> None:
+    config.chain = chain
+    if contract:
+        config.contract_address = contract
+    if rpc:
+        config.rpc_url = rpc
+    config.save()
+    LOG.info("Config saved to %s", config.config_path(DEFAULT_CONFIG_FILE))
+
+# -----------------------------------------------------------------------------
+# Validation and helpers
+# -----------------------------------------------------------------------------
+
+def validate_address(addr: str) -> bool:
+    if not addr or len(addr) < 40:
+        return False
+    addr = addr.replace("0x", "")
+    return len(addr) == 40 and all(c in "0123456789abcdefABCDEF" for c in addr)
+
+def validate_bytes32(s: str) -> bool:
+    s = s.replace("0x", "")
+    return len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s)
+
+def validate_claw_kind(kind: int) -> bool:
+    return 1 <= kind <= MAX_CLAW_KIND
+
+def claw_kind_to_name(kind: int) -> str:
+    return CLAW_KIND_NAMES[kind] if 1 <= kind < len(CLAW_KIND_NAMES) else "unknown"
+
+def claw_name_to_kind(name: str) -> int:
+    name = name.lower().strip()
+    for i, n in enumerate(CLAW_KIND_NAMES):
+        if n and n == name:
+            return i
+    return 0
+
+def wei_to_ether(wei: int) -> float:
+    return wei / 1e18
+
+def ether_to_wei(ether: float) -> int:
+    return int(ether * 1e18)
+
+def format_wei(wei: int) -> str:
+    if wei >= 1e18:
+        return f"{wei_to_ether(wei):.4f} ETH"
+    return f"{wei} wei"
+
+def list_claw_kinds() -> list[tuple[int, str]]:
+    return [(i, CLAW_KIND_NAMES[i]) for i in range(1, len(CLAW_KIND_NAMES)) if CLAW_KIND_NAMES[i]]
+
+def get_version() -> str:
+    return f"{APP_NAME} {APP_VERSION}"
+
+def config_from_env() -> dict[str, Any]:
+    out = {}
+    if os.environ.get("AAIXII_RPC_URL"):
+        out["rpc_url"] = os.environ.get("AAIXII_RPC_URL")
+    if os.environ.get("AAIXII_CONTRACT"):
+        out["contract_address"] = os.environ.get("AAIXII_CONTRACT")
+    if os.environ.get("AAIXII_CHAIN"):
+        out["chain"] = os.environ.get("AAIXII_CHAIN")
+    if os.environ.get("AAIXII_PRIVATE_KEY"):
+        out["private_key"] = os.environ.get("AAIXII_PRIVATE_KEY")
+    return out
+
+def apply_env_to_config(config: AAIXIIConfig) -> AAIXIIConfig:
+    for k, v in config_from_env().items():
+        setattr(config, k, v)
+    return config
+
+def health_check(config: AAIXIIConfig) -> dict[str, Any]:
+    result = {"ok": False, "rpc": config.effective_rpc, "contract": config.contract_address, "web3": WEB3_AVAILABLE}
+    if not WEB3_AVAILABLE or not config.contract_address:
+        return result
+    try:
+        client = AngelaAIXClient(config.effective_rpc, config.contract_address)
+        result["connected"] = client.is_connected()
