@@ -238,3 +238,83 @@ class AngelaAIXClient:
         tx = self.contract.functions.markClawExecuted(claw_id, actual_value).build_transaction(
             {"from": self.account.address, "gas": 150_000}
         )
+        signed = self.w3.eth.account.sign_transaction(tx, self.account.key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        return tx_hash.hex()
+
+    def mark_reverted(self, claw_id: int, reason: bytes) -> str:
+        if not self.account:
+            raise ValueError("Private key required")
+        tx = self.contract.functions.markClawReverted(claw_id, reason).build_transaction(
+            {"from": self.account.address, "gas": 150_000}
+        )
+        signed = self.w3.eth.account.sign_transaction(tx, self.account.key)
+        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+        return tx_hash.hex()
+
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
+
+def cmd_info(config: AAIXIIConfig) -> None:
+    if not config.contract_address or not WEB3_AVAILABLE:
+        LOG.warning("Set contract_address and install web3")
+        return
+    client = AngelaAIXClient(config.effective_rpc, config.contract_address)
+    if not client.is_connected():
+        LOG.error("RPC not connected")
+        return
+    count = client.claw_count()
+    can_submit = client.can_submit_now()
+    paused = client.is_paused()
+    halted = client.is_halted()
+    balance = client.get_balance()
+    op = client.get_operator()
+    guard = client.get_guardian()
+    LOG.info("Claw count: %s | Can submit: %s | Paused: %s | Halted: %s", count, can_submit, paused, halted)
+    LOG.info("Balance: %s wei | Operator: %s | Guardian: %s", balance, op[:16], guard[:16])
+
+def cmd_list_claws(config: AAIXIIConfig, limit: int = 20, offset: int = 0) -> None:
+    if not config.contract_address or not WEB3_AVAILABLE:
+        LOG.warning("Set contract_address and install web3")
+        return
+    client = AngelaAIXClient(config.effective_rpc, config.contract_address)
+    ids = client.get_claw_ids_paginated(offset, limit)
+    for i in ids:
+        try:
+            kind, payload, min_v, max_v, op, sub_block, executed, reverted, exec_block, actual = client.get_claw(i)
+            name = CLAW_KIND_NAMES[kind] if kind < len(CLAW_KIND_NAMES) else "?"
+            LOG.info("  [%s] kind=%s min=%s max=%s executed=%s reverted=%s", i, name, min_v, max_v, executed, reverted)
+        except Exception as e:
+            LOG.debug("claw %s: %s", i, e)
+
+def cmd_submit(config: AAIXIIConfig, kind: int, payload_hash: str, min_val: int, max_val: int) -> None:
+    if not config.private_key or not config.contract_address:
+        LOG.error("Set private_key and contract_address")
+        return
+    if not WEB3_AVAILABLE:
+        LOG.error("web3 required")
+        return
+    client = AngelaAIXClient(config.effective_rpc, config.contract_address, config.private_key)
+    tx_hash = client.submit_claw(kind, payload_hash, min_val, max_val)
+    LOG.info("Submit tx: %s", tx_hash)
+
+def cmd_mark_executed(config: AAIXIIConfig, claw_id: int, actual_value: int) -> None:
+    if not config.private_key or not config.contract_address:
+        LOG.error("Set private_key and contract_address")
+        return
+    if not WEB3_AVAILABLE:
+        LOG.error("web3 required")
+        return
+    client = AngelaAIXClient(config.effective_rpc, config.contract_address, config.private_key)
+    tx_hash = client.mark_executed(claw_id, actual_value)
+    LOG.info("Mark executed tx: %s", tx_hash)
+
+def cmd_mark_reverted(config: AAIXIIConfig, claw_id: int, reason: str = "") -> None:
+    if not config.private_key or not config.contract_address:
+        LOG.error("Set private_key and contract_address")
+        return
+    if not WEB3_AVAILABLE:
+        LOG.error("web3 required")
+        return
+    client = AngelaAIXClient(config.effective_rpc, config.contract_address, config.private_key)
